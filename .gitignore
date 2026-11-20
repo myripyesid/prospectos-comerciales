@@ -1,0 +1,4 @@
+# Created by venv; see https://docs.python.org/3/library/venv.htmlvenv
+venv/
+wa_profile/
+resultados_csv/whatsapp_envios.csv

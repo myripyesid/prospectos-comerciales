@@ -63,7 +63,7 @@ def dias_360(inicio, fin):
         return 0
     d1 = min(inicio.day, 30)
     d2 = 30 if (fin.day == 31 or _es_fin_de_febrero(fin)) else fin.day
-    return (fin.year - inicio.year) * 360 + (fin.month - inicio.month) * 30 + (d2 - d1) + 1
+    return (fin.year - inicio.year) * 360 + (fin.month - inicio.month) * 30 + (d2 - d1)
 
 
 # ---------------------------------------------------------------- resultado
@@ -405,14 +405,7 @@ def exportar_pdf(liq, ruta, datos=None):
         + val_indem
     )
 
-    base_ss = val_sal_pend + horas_extras
-    aplicar_ss = datos.get("Aplicar ss pendiente", True)
-    ded_salud = _pesos(base_ss * 0.04) if aplicar_ss else 0
-    ded_pension = _pesos(base_ss * 0.04) if aplicar_ss else 0
-    prestamos = _pesos(datos.get("Prestamos", 0) or 0)
-    total_deducciones = ded_salud + ded_pension + prestamos
-
-    valor_neto = max(0, total_devengos - total_deducciones)
+    valor_neto = total_devengos
 
     doc = SimpleDocTemplate(
         ruta,
@@ -631,16 +624,6 @@ def exportar_pdf(liq, ruta, datos=None):
     idx_tot_dev = len(filas_pagos)
     filas_pagos.append(["TOTAL DEVENGOS", "", "", "", "", "", "", fmt_dinero(total_devengos)])
 
-    idx_hdr_desc = len(filas_pagos)
-    filas_pagos.extend([
-        ["RESUMEN DESCUENTOS LIQUIDACION :", "", "MENSUAL", "QUINC.", "", "", "", ""],
-        ["SALUD:", "4%", fmt_num(base_ss), "", "", "", "", fmt_dinero(ded_salud)],
-        ["PENSION:", "4%", fmt_num(base_ss), "", "", "", "", fmt_dinero(ded_pension)],
-        ["PRESTAMOS O ANTICIPOS:", "", "", "", "", "", "", fmt_dinero(prestamos)],
-    ])
-    idx_tot_desc = len(filas_pagos)
-    filas_pagos.append(["TOTAL DEDUCCIONES", "", "", "", "", "", "", fmt_dinero(total_deducciones)])
-
     idx_val_liq = len(filas_pagos)
     filas_pagos.append(["VALOR LIQUIDACION", "", "", "", "", "", "", fmt_dinero(valor_neto)])
 
@@ -664,13 +647,6 @@ def exportar_pdf(liq, ruta, datos=None):
         ("LINEBELOW", (0, idx_tot_dev), (-1, idx_tot_dev), 1.2, NEGRO),
         ("BOX", (7, idx_tot_dev), (7, idx_tot_dev), 1.5, NEGRO),
         ("FONTNAME", (7, idx_tot_dev), (7, idx_tot_dev), "Helvetica-Bold"),
-        ("BACKGROUND", (0, idx_hdr_desc), (0, idx_hdr_desc), GRIS_BARRA),
-        ("BOX", (0, idx_hdr_desc), (0, idx_hdr_desc), 1, NEGRO),
-        ("FONTNAME", (2, idx_hdr_desc), (3, idx_hdr_desc), "Helvetica-Bold"),
-        ("LINEABOVE", (0, idx_tot_desc), (-1, idx_tot_desc), 1.2, NEGRO),
-        ("LINEBELOW", (0, idx_tot_desc), (-1, idx_tot_desc), 1.2, NEGRO),
-        ("BOX", (7, idx_tot_desc), (7, idx_tot_desc), 1.5, NEGRO),
-        ("FONTNAME", (7, idx_tot_desc), (7, idx_tot_desc), "Helvetica-Bold"),
         ("LINEABOVE", (0, idx_val_liq), (-1, idx_val_liq), 1.2, NEGRO),
         ("LINEBELOW", (0, idx_val_liq), (-1, idx_val_liq), 1.2, NEGRO),
         ("BOX", (7, idx_val_liq), (7, idx_val_liq), 1.5, NEGRO),

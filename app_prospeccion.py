@@ -5,11 +5,14 @@ import random
 import threading
 import urllib.parse
 import webbrowser
+from datetime import datetime
 import pandas as pd
 import customtkinter as ctk
 from tkinter import messagebox, filedialog
 import csv
 import liquidacion as liq_mod
+import reportes as reportes_mod
+import cotizaciones as cot_mod
 from playwright.sync_api import sync_playwright
 from whatsapp_bot import BotWhatsApp
 
@@ -29,8 +32,10 @@ class AppProspeccion(ctk.CTk):
         # Carpetas de salida
         self.carpeta_excel = "resultados_excel"
         self.carpeta_csv = "resultados_csv"
+        self.carpeta_cotizaciones = "cotizaciones"
         os.makedirs(self.carpeta_excel, exist_ok=True)
         os.makedirs(self.carpeta_csv, exist_ok=True)
+        os.makedirs(self.carpeta_cotizaciones, exist_ok=True)
 
         # Variables de estado para campaña WhatsApp
         self.df_campana = pd.DataFrame()
@@ -43,10 +48,14 @@ class AppProspeccion(ctk.CTk):
         self.tab_scraper = self.tabview.add("1. Extractor Google Maps")
         self.tab_whatsapp = self.tabview.add("2. Asistente WhatsApp")
         self.tab_liquidacion = self.tabview.add("3. Liquidación")
+        self.tab_reportes = self.tabview.add("4. Reportes")
+        self.tab_cotizaciones = self.tabview.add("5. Cotizaciones")
 
         self.construir_tab_scraper()
         self.construir_tab_whatsapp()
         self.construir_tab_liquidacion()
+        self.construir_tab_reportes()
+        self.construir_tab_cotizaciones()
 
     # =========================================================================
     # PESTAÑA 1: EXTRACTOR GOOGLE MAPS
@@ -213,6 +222,7 @@ class AppProspeccion(ctk.CTk):
 
             if resultados:
                 df = pd.DataFrame(resultados)
+                df["Contactado"] = "No"
                 nombre_archivo = re.sub(r'[^\w\s-]', '', busqueda).strip().replace(" ", "_").lower()
 
                 df_con = df[df["Teléfono"] != "No disponible"]
@@ -455,6 +465,7 @@ class AppProspeccion(ctk.CTk):
 
         municipio = self.entry_municipio.get().strip()
         contactos = [(r["Nombre"], r["Celular_Limpio"]) for _, r in self.df_campana.iterrows()]
+        ruta_csv_campana = self.ruta_csv_campana
         self.bot = BotWhatsApp(
             contactos=contactos,
             generar_mensaje=lambda nombre: self.generar_spintax(nombre, municipio),
@@ -464,6 +475,7 @@ class AppProspeccion(ctk.CTk):
             config=cfg,
             on_log=self._log_bot,
             on_progreso=lambda i, n: self.after(0, lambda: self.lbl_bot_prog.configure(text=f"{i}/{n}")),
+            on_contactado=lambda numero: reportes_mod.marcar_contactado_csv(ruta_csv_campana, numero),
             on_fin=lambda: self.after(0, self._bot_terminado),
         )
         self.btn_bot_inicio.configure(state="disabled")
@@ -540,7 +552,17 @@ class AppProspeccion(ctk.CTk):
             return
 
         ruta = os.path.join(self.carpeta_csv, archivo)
-        df = pd.read_csv(ruta)
+        ruta_log = os.path.join(self.carpeta_csv, "whatsapp_envios.csv")
+        self.df_campana = pd.DataFrame()
+        self.btn_regenerar.configure(state="disabled")
+        self.btn_abrir_wa.configure(state="disabled")
+        self.btn_siguiente.configure(state="disabled")
+        try:
+            df = reportes_mod.preparar_base_contactos(ruta, ruta_log)
+        except (OSError, UnicodeError, csv.Error, ValueError, pd.errors.ParserError) as error:
+            messagebox.showerror("Error al cargar base", str(error))
+            return
+        self.ruta_csv_campana = ruta
         df['Celular_Limpio'] = df['Teléfono'].apply(self.limpiar_celular_colombia)
 
         # Guardar fijos aparte
@@ -548,11 +570,15 @@ class AppProspeccion(ctk.CTk):
         if not fijos.empty:
             fijos.to_csv(os.path.join(self.carpeta_csv, "fijos_para_llamar.csv"), index=False, encoding="utf-8-sig")
 
-        self.df_campana = df.dropna(subset=['Celular_Limpio']).reset_index(drop=True)
+        df_con_celular = df.dropna(subset=['Celular_Limpio'])
+        self.df_campana = df_con_celular[df_con_celular["Contactado"] != "Sí"].reset_index(drop=True)
         self.indice_actual = 0
 
-        if self.df_campana.empty:
+        if df_con_celular.empty:
             messagebox.showinfo("Sin celulares", "Este archivo solo contiene teléfonos fijos (guardados en fijos_para_llamar.csv).")
+            return
+        if self.df_campana.empty:
+            messagebox.showinfo("Base completada", "Todos los celulares de esta base ya figuran como contactados.")
             return
 
         self.btn_regenerar.configure(state="normal")
@@ -570,6 +596,7 @@ class AppProspeccion(ctk.CTk):
         numero = fila['Celular_Limpio']
         municipio = self.entry_municipio.get().strip()
 
+        self.btn_abrir_wa.configure(state="normal")
         self.lbl_contador.configure(text=f"Contacto {self.indice_actual + 1} de {len(self.df_campana)}")
         self.lbl_negocio.configure(text=nombre)
         self.lbl_telefono.configure(text=f"Celular: +{numero}")
@@ -585,7 +612,18 @@ class AppProspeccion(ctk.CTk):
 
         texto_codificado = urllib.parse.quote(mensaje)
         url_wa = f"https://web.whatsapp.com/send?phone={numero}&text={texto_codificado}"
-        webbrowser.open(url_wa)
+        if not webbrowser.open(url_wa):
+            messagebox.showerror("Error", "No se pudo abrir WhatsApp Web.")
+            return
+        try:
+            reportes_mod.marcar_contactado_csv(self.ruta_csv_campana, numero)
+        except (OSError, UnicodeError, ValueError) as error:
+            messagebox.showerror("No se pudo guardar el contacto", str(error))
+            return
+        self.df_campana.loc[
+            self.df_campana["Celular_Limpio"] == numero, "Contactado"
+        ] = "Sí"
+        self.btn_abrir_wa.configure(state="disabled")
 
     def siguiente_contacto(self):
         self.indice_actual += 1
@@ -595,6 +633,412 @@ class AppProspeccion(ctk.CTk):
             self.lbl_contador.configure(text="¡Lista finalizada!")
             self.btn_abrir_wa.configure(state="disabled")
             self.btn_siguiente.configure(state="disabled")
+
+    # =========================================================================
+    # PESTAÑA 4: REPORTES DE CONTACTOS
+    # =========================================================================
+    def construir_tab_reportes(self):
+        cont = ctk.CTkScrollableFrame(self.tab_reportes)
+        cont.pack(fill="both", expand=True, padx=5, pady=5)
+
+        ctk.CTkLabel(
+            cont,
+            text="Reporte de contactos",
+            font=ctk.CTkFont(size=20, weight="bold")
+        ).pack(pady=(15, 5))
+        ctk.CTkLabel(
+            cont,
+            text="El total incluye celulares del CSV con estado 'enviado' en el registro de WhatsApp.",
+            text_color="gray",
+            wraplength=650
+        ).pack(pady=(0, 15))
+
+        selector = ctk.CTkFrame(cont)
+        selector.pack(fill="x", padx=20, pady=5)
+        self.combo_reporte_csv = ctk.CTkComboBox(
+            selector, width=480, state="readonly",
+            command=lambda _valor: self.actualizar_total_reporte()
+        )
+        self.combo_reporte_csv.pack(side="left", padx=10, pady=10)
+        ctk.CTkButton(
+            selector, text="↻", width=40,
+            command=self.actualizar_lista_reportes
+        ).pack(side="left", padx=(0, 10))
+
+        self.lbl_total_reporte = ctk.CTkLabel(
+            cont, text="Contactos enviados: 0",
+            font=ctk.CTkFont(size=16, weight="bold"), text_color="#3B8ED0"
+        )
+        self.lbl_total_reporte.pack(pady=(15, 10))
+
+        form = ctk.CTkFrame(cont)
+        form.pack(fill="x", padx=20, pady=5)
+        form.grid_columnconfigure((0, 1), weight=1)
+        ctk.CTkLabel(form, text="Nombre de la base (opcional):").grid(
+            row=0, column=0, columnspan=2, sticky="w", padx=15, pady=(15, 4)
+        )
+        self.entry_reporte_nombre = ctk.CTkEntry(
+            form, placeholder_text="Vacío = usar el nombre del CSV"
+        )
+        self.entry_reporte_nombre.grid(
+            row=1, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 12)
+        )
+        ctk.CTkLabel(form, text="Contactos hablados manualmente (opcional):").grid(
+            row=2, column=0, columnspan=2, sticky="w", padx=15, pady=(4, 4)
+        )
+        self.entry_reporte_contactados = ctk.CTkEntry(
+            form, placeholder_text="Vacío = usar total del registro de WhatsApp"
+        )
+        self.entry_reporte_contactados.grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=15, pady=(0, 12)
+        )
+        self.entry_reporte_contactados.bind("<KeyRelease>", self.actualizar_vista_reporte)
+        ctk.CTkLabel(form, text="Personas que respondieron:").grid(
+            row=4, column=0, sticky="w", padx=15, pady=(4, 4)
+        )
+        ctk.CTkLabel(form, text="Citas concretadas:").grid(
+            row=4, column=1, sticky="w", padx=15, pady=(4, 4)
+        )
+        self.entry_reporte_respuestas = ctk.CTkEntry(form, placeholder_text="0")
+        self.entry_reporte_respuestas.insert(0, "0")
+        self.entry_reporte_respuestas.grid(row=5, column=0, sticky="ew", padx=15, pady=(0, 15))
+        self.entry_reporte_citas = ctk.CTkEntry(form, placeholder_text="0")
+        self.entry_reporte_citas.insert(0, "0")
+        self.entry_reporte_citas.grid(row=5, column=1, sticky="ew", padx=15, pady=(0, 15))
+        self.entry_reporte_respuestas.bind("<KeyRelease>", self.actualizar_vista_reporte)
+        self.entry_reporte_citas.bind("<KeyRelease>", self.actualizar_vista_reporte)
+
+        self.lbl_vista_reporte = ctk.CTkLabel(
+            cont, text="Respuesta: 0.0%  |  Citas: 0.0%",
+            font=ctk.CTkFont(size=14), wraplength=650
+        )
+        self.lbl_vista_reporte.pack(pady=15)
+        ctk.CTkLabel(
+            cont,
+            text="El PDF incluye gráficos de barras y pastel con los resultados.",
+            text_color="gray"
+        ).pack(pady=(0, 10))
+        ctk.CTkButton(
+            cont, text="Exportar reporte en PDF", height=40,
+            fg_color="#B03A3A", hover_color="#8A2C2C",
+            command=self.exportar_reporte_contactos_pdf
+        ).pack(pady=10)
+
+        self.actualizar_lista_reportes()
+
+    def actualizar_lista_reportes(self):
+        excluidos = {
+            "whatsapp_envios.csv", "asistente_whatsapp.csv",
+            "fijos_para_llamar.csv", "telefonos_fijos_para_llamar.csv",
+        }
+        archivos = sorted(
+            nombre for nombre in os.listdir(self.carpeta_csv)
+            if nombre.lower().endswith(".csv")
+            and nombre.lower() not in excluidos
+            and not nombre.lower().endswith("_sin_telefono.csv")
+        )
+        if not archivos:
+            self.combo_reporte_csv.configure(values=["No hay CSVs disponibles"])
+            self.combo_reporte_csv.set("No hay CSVs disponibles")
+            self.reporte_total_contactos = 0
+            self.lbl_total_reporte.configure(text="Contactos enviados: 0")
+            self.actualizar_vista_reporte()
+            return
+
+        self.combo_reporte_csv.configure(values=archivos)
+        self.combo_reporte_csv.set(archivos[0])
+        self.actualizar_total_reporte()
+
+    def actualizar_total_reporte(self):
+        archivo = self.combo_reporte_csv.get()
+        if not archivo or archivo == "No hay CSVs disponibles":
+            self.reporte_total_contactos = 0
+            self.lbl_total_reporte.configure(text="Contactos enviados: 0")
+            self.actualizar_vista_reporte()
+            return
+
+        ruta = os.path.join(self.carpeta_csv, archivo)
+        ruta_log = os.path.join(self.carpeta_csv, "whatsapp_envios.csv")
+        try:
+            reportes_mod.preparar_base_contactos(ruta, ruta_log)
+            self.reporte_total_contactos = reportes_mod.contar_contactos_csv(ruta)
+        except (OSError, UnicodeError, csv.Error, ValueError) as error:
+            self.reporte_total_contactos = 0
+            self.lbl_total_reporte.configure(text="No se pudo leer el CSV o el registro de WhatsApp")
+            messagebox.showerror("Error al leer CSV", str(error))
+        else:
+            self.lbl_total_reporte.configure(
+                text=f"Contactos enviados: {self.reporte_total_contactos}"
+            )
+        self.actualizar_vista_reporte()
+
+    def _calcular_metricas_reporte(self, total_registrado):
+        manual = self.entry_reporte_contactados.get().strip()
+        total = int(manual) if manual else total_registrado
+        return reportes_mod.calcular_metricas(
+            total,
+            int(self.entry_reporte_respuestas.get()),
+            int(self.entry_reporte_citas.get()),
+            total_manual=bool(manual)
+        )
+
+    def actualizar_vista_reporte(self, _evento=None):
+        try:
+            metricas = self._calcular_metricas_reporte(
+                getattr(self, "reporte_total_contactos", 0)
+            )
+        except ValueError:
+            self.lbl_vista_reporte.configure(text="Revisa los totales ingresados.")
+            return
+        origen = "manual" if metricas["total_manual"] else "registro WhatsApp"
+        self.lbl_vista_reporte.configure(
+            text=(
+                f"Total usado: {metricas['total']} ({origen})  |  "
+                f"Respuesta: {metricas['porcentaje_respuesta']:.1f}%  |  "
+                f"Citas: {metricas['porcentaje_citas']:.1f}%"
+            )
+        )
+
+    def exportar_reporte_contactos_pdf(self):
+        archivo = self.combo_reporte_csv.get()
+        if not archivo or archivo == "No hay CSVs disponibles":
+            messagebox.showwarning("Sin base", "Selecciona un CSV de contactos.")
+            return
+
+        try:
+            ruta_csv = os.path.join(self.carpeta_csv, archivo)
+            if self.entry_reporte_contactados.get().strip():
+                if not os.path.isfile(ruta_csv):
+                    raise FileNotFoundError(f"No se encontró el CSV seleccionado: {archivo}")
+                total = 0
+            else:
+                reportes_mod.preparar_base_contactos(
+                    ruta_csv,
+                    os.path.join(self.carpeta_csv, "whatsapp_envios.csv")
+                )
+                total = reportes_mod.contar_contactos_csv(ruta_csv)
+            metricas = self._calcular_metricas_reporte(total)
+        except (OSError, UnicodeError, csv.Error, ValueError) as error:
+            messagebox.showerror("Revisa los datos", str(error))
+            return
+
+        nombre_archivo = os.path.splitext(archivo)[0]
+        nombre_base = self.entry_reporte_nombre.get().strip() or nombre_archivo
+        ruta = filedialog.asksaveasfilename(
+            defaultextension=".pdf",
+            filetypes=[("PDF", "*.pdf")],
+            initialfile=f"reporte_contactos_{nombre_archivo}.pdf"
+        )
+        if not ruta:
+            return
+        try:
+            reportes_mod.exportar_reporte_pdf(ruta, nombre_base, metricas)
+        except PermissionError:
+            messagebox.showerror("Error", "No se pudo guardar. ¿Tienes el archivo abierto en otro programa?")
+            return
+        except Exception as error:
+            messagebox.showerror("Error al generar PDF", str(error))
+            return
+        messagebox.showinfo("Exportado", f"Reporte guardado en:\n{ruta}")
+
+    # =========================================================================
+    # PESTAÑA 5: COTIZACIONES
+    # =========================================================================
+    def construir_tab_cotizaciones(self):
+        cont = ctk.CTkScrollableFrame(self.tab_cotizaciones)
+        cont.pack(fill="both", expand=True, padx=5, pady=5)
+
+        ctk.CTkLabel(
+            cont, text="Generar cotización",
+            font=ctk.CTkFont(size=20, weight="bold")
+        ).pack(pady=(10, 5))
+
+        datos = ctk.CTkFrame(cont)
+        datos.pack(fill="x", padx=12, pady=6)
+        datos.grid_columnconfigure((1, 3), weight=1)
+
+        def campo(fila, columna, texto, atributo, placeholder="", inicial=None):
+            ctk.CTkLabel(datos, text=texto, anchor="w").grid(
+                row=fila * 2, column=columna * 2, sticky="w",
+                padx=(10, 4), pady=(6, 2)
+            )
+            entrada = ctk.CTkEntry(datos, placeholder_text=placeholder)
+            entrada.grid(
+                row=fila * 2 + 1, column=columna * 2 + 1, sticky="ew",
+                padx=(0, 10), pady=(0, 5)
+            )
+            if inicial:
+                entrada.insert(0, inicial)
+            setattr(self, atributo, entrada)
+
+        campo(0, 0, "Cliente:", "cot_cliente", "Nombre o razón social")
+        campo(0, 1, "NIT:", "cot_nit", "Opcional")
+        campo(1, 0, "Dirección:", "cot_direccion", "Dirección del cliente")
+        campo(1, 1, "Teléfono:", "cot_telefono", "Teléfono del cliente")
+        campo(
+            2, 0, "Fecha (AAAA-MM-DD):", "cot_fecha",
+            inicial=datetime.now().strftime("%Y-%m-%d")
+        )
+        campo(2, 1, "Número de cotización:", "cot_numero", "Ej: 205")
+        campo(3, 0, "Fecha o plazo de entrega:", "cot_fecha_entrega", "Ej: 12 días hábiles")
+        campo(3, 1, "Garantía:", "cot_garantia", "Ej: 2 años en ajustes")
+
+        ctk.CTkLabel(
+            cont, text="Productos o servicios",
+            font=ctk.CTkFont(size=15, weight="bold")
+        ).pack(anchor="w", padx=15, pady=(8, 2))
+        self.frame_cotizacion_items = ctk.CTkFrame(cont)
+        self.frame_cotizacion_items.pack(fill="x", padx=12, pady=4)
+        self.frame_cotizacion_items.grid_columnconfigure(1, weight=1)
+        for columna, texto in enumerate(("CANT.", "DESCRIPCIÓN", "VALOR UNITARIO", "VALOR TOTAL", "")):
+            ctk.CTkLabel(
+                self.frame_cotizacion_items, text=texto,
+                font=ctk.CTkFont(size=11, weight="bold")
+            ).grid(row=0, column=columna, sticky="ew", padx=4, pady=5)
+
+        self.cotizacion_items = []
+        self.btn_agregar_item_cotizacion = ctk.CTkButton(
+            cont, text="+ Agregar producto", width=150,
+            command=self.agregar_item_cotizacion
+        )
+        self.btn_agregar_item_cotizacion.pack(anchor="w", padx=15, pady=5)
+        self.lbl_total_cotizacion = ctk.CTkLabel(
+            cont, text="TOTAL: $ 0",
+            font=ctk.CTkFont(size=16, weight="bold"), text_color="#00A9DC"
+        )
+        self.lbl_total_cotizacion.pack(anchor="e", padx=20, pady=8)
+        botones_exportacion = ctk.CTkFrame(cont, fg_color="transparent")
+        botones_exportacion.pack(pady=(5, 15))
+        ctk.CTkButton(
+            botones_exportacion, text="Exportar PDF", height=40,
+            fg_color="#00A9DC", hover_color="#0785AC",
+            command=self.exportar_cotizacion_pdf
+        ).pack(side="left", padx=6)
+        ctk.CTkButton(
+            botones_exportacion, text="Exportar Excel", height=40,
+            fg_color="#1D6F42", hover_color="#155230",
+            command=self.exportar_cotizacion_excel
+        ).pack(side="left", padx=6)
+
+        self.agregar_item_cotizacion()
+
+    def agregar_item_cotizacion(self):
+        frame = self.frame_cotizacion_items
+        fila = len(self.cotizacion_items) + 1
+        cantidad = ctk.CTkEntry(frame, width=65, placeholder_text="1")
+        descripcion = ctk.CTkEntry(frame, placeholder_text="Descripción del producto")
+        valor_unitario = ctk.CTkEntry(frame, width=125, placeholder_text="0")
+        valor_total = ctk.CTkLabel(frame, text="—", width=125)
+        cantidad.grid(row=fila, column=0, sticky="ew", padx=3, pady=3)
+        descripcion.grid(row=fila, column=1, sticky="ew", padx=3, pady=3)
+        valor_unitario.grid(row=fila, column=2, sticky="ew", padx=3, pady=3)
+        valor_total.grid(row=fila, column=3, sticky="ew", padx=3, pady=3)
+        item = {
+            "cantidad": cantidad,
+            "descripcion": descripcion,
+            "valor_unitario": valor_unitario,
+            "valor_total": valor_total,
+        }
+        eliminar = ctk.CTkButton(
+            frame, text="×", width=30, fg_color="gray35",
+            command=lambda fila_item=item: self.eliminar_item_cotizacion(fila_item)
+        )
+        eliminar.grid(row=fila, column=4, padx=3, pady=3)
+        item["eliminar"] = eliminar
+        self.cotizacion_items.append(item)
+        cantidad.bind("<KeyRelease>", self.actualizar_totales_cotizacion)
+        valor_unitario.bind("<KeyRelease>", self.actualizar_totales_cotizacion)
+
+    def eliminar_item_cotizacion(self, item):
+        for widget in item.values():
+            widget.destroy()
+        self.cotizacion_items.remove(item)
+        for fila, linea in enumerate(self.cotizacion_items, start=1):
+            for columna, clave in enumerate(
+                ("cantidad", "descripcion", "valor_unitario", "valor_total", "eliminar")
+            ):
+                linea[clave].grid_configure(row=fila, column=columna)
+        self.actualizar_totales_cotizacion()
+
+    def actualizar_totales_cotizacion(self, _evento=None):
+        subtotal = 0
+        for item in self.cotizacion_items:
+            try:
+                cantidad = cot_mod.parsear_cantidad(item["cantidad"].get())
+                valor_unitario = cot_mod.parsear_valor(item["valor_unitario"].get())
+            except ValueError:
+                item["valor_total"].configure(text="—")
+                continue
+            total_linea = cantidad * valor_unitario
+            subtotal += total_linea
+            item["valor_total"].configure(text=cot_mod.formatear_pesos(total_linea))
+        self.lbl_total_cotizacion.configure(text=f"TOTAL: {cot_mod.formatear_pesos(subtotal)}")
+
+    def obtener_cotizacion_formulario(self):
+        lineas = [{
+            "cantidad": item["cantidad"].get(),
+            "descripcion": item["descripcion"].get(),
+            "valor_unitario": item["valor_unitario"].get(),
+        } for item in self.cotizacion_items]
+        return cot_mod.calcular_cotizacion(
+            cliente=self.cot_cliente.get(),
+            nit=self.cot_nit.get(),
+            direccion=self.cot_direccion.get(),
+            telefono=self.cot_telefono.get(),
+            fecha=self.cot_fecha.get(),
+            numero=self.cot_numero.get(),
+            items=lineas,
+            fecha_entrega=self.cot_fecha_entrega.get(),
+            garantia=self.cot_garantia.get(),
+        )
+
+    def seleccionar_ruta_cotizacion(self, cotizacion, extension, tipo_archivo):
+        numero_archivo = re.sub(r"[^\w-]+", "_", cotizacion["numero"]).strip("_") or "sin_numero"
+        os.makedirs(self.carpeta_cotizaciones, exist_ok=True)
+        return filedialog.asksaveasfilename(
+            initialdir=os.path.abspath(self.carpeta_cotizaciones),
+            initialfile=f"cotizacion_{numero_archivo}.{extension}",
+            defaultextension=f".{extension}",
+            filetypes=[(tipo_archivo, f"*.{extension}")],
+        )
+
+    def exportar_cotizacion_pdf(self):
+        try:
+            cotizacion = self.obtener_cotizacion_formulario()
+        except ValueError as error:
+            messagebox.showerror("Revisa los datos", str(error))
+            return
+        ruta = self.seleccionar_ruta_cotizacion(cotizacion, "pdf", "PDF")
+        if not ruta:
+            return
+        try:
+            cot_mod.exportar_pdf(ruta, cotizacion)
+        except PermissionError:
+            messagebox.showerror("Error", "No se pudo guardar. Cierra el PDF si está abierto e inténtalo de nuevo.")
+            return
+        except Exception as error:
+            messagebox.showerror("Error al generar PDF", str(error))
+            return
+        messagebox.showinfo("Cotización exportada", f"PDF guardado en:\n{ruta}")
+
+    def exportar_cotizacion_excel(self):
+        try:
+            cotizacion = self.obtener_cotizacion_formulario()
+        except ValueError as error:
+            messagebox.showerror("Revisa los datos", str(error))
+            return
+        ruta = self.seleccionar_ruta_cotizacion(cotizacion, "xlsx", "Excel")
+        if not ruta:
+            return
+        try:
+            cot_mod.exportar_excel(ruta, cotizacion)
+        except PermissionError:
+            messagebox.showerror("Error", "No se pudo guardar. Cierra el archivo Excel si está abierto e inténtalo de nuevo.")
+            return
+        except Exception as error:
+            messagebox.showerror("Error al generar Excel", str(error))
+            return
+        messagebox.showinfo("Cotización exportada", f"Archivo Excel guardado en:\n{ruta}")
 
     # =========================================================================
     # PESTAÑA 3: LIQUIDACIÓN DE TRABAJADOR (COLOMBIA)

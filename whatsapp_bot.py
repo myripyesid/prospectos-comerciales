@@ -51,7 +51,8 @@ CONFIG_DEFECTO = {
 class BotWhatsApp:
     def __init__(self, contactos, generar_mensaje, ruta_log, perfil_dir,
                  modo="manual", config=None,
-                 on_log=print, on_progreso=lambda i, n: None, on_fin=lambda: None):
+                 on_log=print, on_progreso=lambda i, n: None,
+                 on_contactado=lambda numero: None, on_fin=lambda: None):
         """
         contactos:        lista de (nombre, numero_con_57)
         generar_mensaje:  callable(nombre) -> str
@@ -66,6 +67,7 @@ class BotWhatsApp:
         self.cfg = {**CONFIG_DEFECTO, **(config or {})}
         self.on_log = on_log
         self.on_progreso = on_progreso
+        self.on_contactado = on_contactado
         self.on_fin = on_fin
 
         self._stop = threading.Event()
@@ -284,6 +286,8 @@ class BotWhatsApp:
 
                     modo_usado = self.modo
                     self._registrar(nombre, numero, estado, modo_usado)
+                    if estado == "enviado":
+                        self.on_contactado(numero)
                     self.on_log(f"   → {estado}")
 
                     if estado == "enviado":
